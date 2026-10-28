@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>隊伍與結算總覽 - 賭大股票系統</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body class="wide">
+<a class="back" href="index.html"><i data-icon="back"></i>回後台</a>
+<h1>隊伍與結算總覽</h1>
+
+<section class="card">
+  <div class="pagehead" style="margin-bottom:4px">
+    <h2 style="margin:0"><i data-icon="trophy"></i>總資產排行與持股</h2>
+    <label class="switch"><input type="checkbox" id="showValue" checked><span aria-hidden="true"></span>顯示市值</label>
+  </div>
+  <p class="hint">四檔欄位是「目前持有張數」，市值用第 <strong id="lbWave">—</strong> 波的股價計算。</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr id="lbHead"></tr></thead>
+      <tbody id="lb"></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card admin-only" hidden>
+  <h2><i data-icon="users"></i>新增隊伍</h2>
+  <form class="inline" id="addForm" onsubmit="return false">
+    <div style="flex:1 1 200px"><label for="newName">隊伍名稱</label><input id="newName"></div>
+    <div style="flex:0 0 130px"><label for="newPin">PIN（4 碼）</label><input id="newPin" maxlength="4" inputmode="numeric"></div>
+    <button id="addBtn" type="submit">新增</button>
+  </form>
+  <p class="error" id="addErr" role="alert" style="margin-top:12px"></p>
+</section>
+
+<section class="card admin-only" id="assetEditor" hidden>
+  <h2><i data-icon="wallet"></i>直接編輯隊伍資產</h2>
+  <p class="hint">設定後的現金與各檔持股會直接覆寫帳戶資料。儲存時會留下異動前後的稽核紀錄。</p>
+  <form id="assetForm" onsubmit="return false">
+    <div style="max-width:360px"><label for="assetTeam">隊伍</label><select id="assetTeam"></select></div>
+    <div style="max-width:360px"><label for="assetCash">可用現金</label><input id="assetCash" type="number" min="0" step="0.01" inputmode="decimal" aria-describedby="assetPreview"></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>股票</th><th class="n">目前價格</th><th class="n">設定持有張數</th></tr></thead>
+        <tbody id="assetHoldings"></tbody>
+      </table>
+    </div>
+    <p class="notice" id="assetPreview" aria-live="polite" style="margin-top:12px"></p>
+    <label for="assetNote">調整備註（選填）</label>
+    <textarea id="assetNote" rows="2" placeholder="例如：現場核帳後補正"></textarea>
+    <p class="error" id="assetErr" role="alert"></p>
+    <p class="ok-msg" id="assetOk" role="status"></p>
+    <button id="assetSaveBtn" type="submit" style="max-width:240px">儲存資產</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2><i data-icon="key"></i>隊伍帳號</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>隊伍</th><th>PIN</th><th class="n">可用現金</th><th class="admin-only" hidden>操作</th></tr></thead>
+      <tbody id="teams"></tbody>
+    </table>
+  </div>
+  <p class="error" id="cashErr" role="alert" style="margin-top:12px"></p>
+</section>
+
+<section class="card">
+  <h2><i data-icon="list"></i>最近成交</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>時間</th><th>隊伍</th><th>股票</th><th>買賣</th><th class="n">張數</th><th class="n">價格</th><th class="n">總額</th></tr></thead>
+      <tbody id="trades"></tbody>
+    </table>
+  </div>
+</section>
+
+<script src="../ui.js"></script>
+<script src="admin.js"></script>
+<script>
+if (requireAdminLogin()) {
+  let isAdmin = false;
+  let teams = [];
+  let lastBoard = null;   // 最近一次的排行榜資料，切換「顯示市值」時重畫用
+  let assetPositions = [];
+  let assetLoadedFor = null;
+  const nameOf = id => (teams.find(t => t.id === id) || {}).display_name || '';
+
+  $('addForm').addEventListener('submit', async () => {
+    $('addErr').textContent = '';
+    const { ok, body } = await api('/teams', {
+      method: 'POST',
+      body: JSON.stringify({ displayName: $('newName').value, pin: $('newPin').value })
+    });
+    if (!ok) { $('addErr').textContent = body.error || '新增失敗'; return; }
+    $('newName').value = ''; $('newPin').value = '';
+    await load();
+  });
+
+  // 資產編輯器的總額是預覽；真正寫入時仍由伺服器驗證並在交易鎖內完成。
+  function updateAssetPreview() {
+    const cash = Number($('assetCash').value);
+    const stockValue = assetPositions.reduce((sum, p) => {
+      const shares = Number($('asset-' + p.stockId)?.value);
+      return sum + (Number.isFinite(shares) && shares >= 0 ? shares * p.price : 0);
+    }, 0);
+    $('assetPreview').textContent = `預覽總資產：現金 ${money(Number.isFinite(cash) && cash >= 0 ? cash : 0)} ＋ 股票市值 ${money(stockValue)} ＝ ${money((Number.isFinite(cash) && cash >= 0 ? cash : 0) + stockValue)}`;
+  }
+
+  async function loadAssetEditor(force = false) {
+    const id = Number($('assetTeam').value);
+    if (!id || (!force && assetLoadedFor === id)) return;
+    $('assetErr').textContent = '';
+    const { ok, body } = await api(`/teams/${id}/portfolio`);
+    // 切換隊伍時，較早送出的請求可能比較晚回來；不能讓它覆蓋現在選取的隊伍。
+    if (Number($('assetTeam').value) !== id) return;
+    if (!ok) { $('assetErr').textContent = body.error || '資產載入失敗'; return; }
+    assetLoadedFor = id;
+    assetPositions = body.positions || [];
+    $('assetCash').value = body.cash;
+    $('assetNote').value = '';
+    $('assetHoldings').innerHTML = assetPositions.map(p => `
+      <tr><td><strong>${esc(p.name)}</strong></td><td class="n">${money(p.price)}</td>
+      <td><input id="asset-${p.stockId}" type="number" min="0" step="1" inputmode="numeric" value="${p.shares}" aria-label="${esc(p.name)} 持有張數"></td></tr>`).join('');
+    $('assetHoldings').querySelectorAll('input').forEach(input => input.addEventListener('input', updateAssetPreview));
+    updateAssetPreview();
+  }
+
+  function syncAssetTeamOptions() {
+    if (!isAdmin) return;
+    const selected = $('assetTeam').value;
+    $('assetTeam').innerHTML = teams.map(t => `<option value="${t.id}">${esc(t.display_name)}</option>`).join('');
+    if (selected && teams.some(t => String(t.id) === selected)) $('assetTeam').value = selected;
+    const id = Number($('assetTeam').value);
+    if (id && assetLoadedFor !== id) loadAssetEditor();
+  }
+
+  window.editAssets = async function (id) {
+    $('assetTeam').value = String(id);
+    await loadAssetEditor(true);
+    $('assetEditor').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    $('assetCash').focus();
+  };
+
+  $('assetTeam').addEventListener('change', () => loadAssetEditor(true));
+  $('assetCash').addEventListener('input', updateAssetPreview);
+  $('assetForm').addEventListener('submit', async () => {
+    const id = Number($('assetTeam').value);
+    $('assetErr').textContent = ''; $('assetOk').textContent = '';
+    const holdings = assetPositions.map(p => ({ stockId: p.stockId, shares: Number($('asset-' + p.stockId).value) }));
+    $('assetSaveBtn').disabled = true;
+    try {
+      const { ok, body } = await api(`/teams/${id}/assets`, {
+        method: 'PATCH', body: JSON.stringify({ cash: Number($('assetCash').value), holdings, note: $('assetNote').value })
+      });
+      if (!ok) { $('assetErr').textContent = body.error || '儲存失敗'; return; }
+      $('assetOk').textContent = `已儲存「${body.displayName}」的資產，並寫入稽核紀錄。`;
+      await load();
+      await loadAssetEditor(true);
+    } finally {
+      $('assetSaveBtn').disabled = false;
+    }
+  });
+
+  // 現場一定會有隊伍把 PIN 忘掉。沒有這顆按鈕就只能去翻資料庫。
+  window.resetPin = async function (id) {
+    const pin = prompt(`「${nameOf(id)}」的新 PIN（4 碼數字）`);
+    if (pin === null) return;
+    $('cashErr').textContent = '';
+    const { ok, body } = await api(`/teams/${id}/pin`, {
+      method: 'PATCH', body: JSON.stringify({ pin: pin.trim() })
+    });
+    if (!ok) { $('cashErr').textContent = body.error || '重設失敗'; return; }
+    await load();
+  };
+
+  // 刪除分兩段：沒有交易/申報紀錄的直接刪；有紀錄的後端會回 409 + needsForce，
+  // 講清楚會連帶刪掉什麼再問一次，確認了才帶 force=1 重送。
+  window.removeTeam = async function (id, force) {
+    const name = nameOf(id);
+    if (!force && !confirm(`確定要刪除「${name}」這支隊伍嗎？此動作無法復原。`)) return;
+    $('cashErr').textContent = '';
+
+    const res = await api(`/teams/${id}${force ? '?force=1' : ''}`, { method: 'DELETE' });
+    if (res.status === 204) { await load(); return; }
+
+    if (res.status === 409 && res.body.needsForce) {
+      const r = res.body.records || {};
+      const ok = confirm(
+        `「${name}」已經有 ${r.trades} 筆成交、${r.deposits} 筆存款申報。\n` +
+        '連同這些紀錄一起刪除的話，排行榜與帳目都會跟著變動。\n\n確定要刪嗎？'
+      );
+      if (!ok) return;
+      return removeTeam(id, true);
+    }
+    $('cashErr').textContent = res.body.error || `刪除失敗 (${res.status})`;
+  };
+
+  // 排行榜 ＋ 每隊四檔持股的矩陣。
+  //
+  // 欄位由伺服器回的 stocks 決定而不是寫死四欄：股票是資料庫裡的資料，之後要
+  // 加減一檔或改名都不用動這一頁。每一列的 positions 也保證涵蓋全部股票（沒
+  // 持股的是 0），所以直接照順序輸出就一定對齊。
+  function renderBoard(body) {
+    const stocks = body.stocks || [];
+    $('lbWave').textContent = body.wave;
+
+    $('lbHead').innerHTML =
+      '<th>名次</th><th>隊伍</th>' +
+      stocks.map(s => `<th class="n">${esc(s.name)}<br><span class="money" style="font-weight:400">${
+        s.price === null ? '尚未開盤' : money(s.price)}</span></th>`).join('') +
+      '<th class="n">現金</th><th class="n">股票現值</th><th class="n">總資產</th>';
+
+    const withValue = $('showValue').checked;
+    const cols = stocks.length + 5;
+
+    $('lb').innerHTML = body.teams.map(t => {
+      const cells = stocks.map(s => {
+        // positions 是照 stocks 的順序來的，但還是用 stockId 對，不靠順序巧合
+        const p = (t.positions || []).find(x => x.stockId === s.id);
+        const shares = p ? p.shares : 0;
+        // 沒持股的格子用淡灰的 0，不留白——空白格會讓人分不清「沒有」和「還沒載入」
+        if (!shares) return '<td class="n zero">0</td>';
+        return `<td class="n">${shares} 張${
+          withValue ? `<br><span class="muted" style="font-weight:400">${money(p.value)}</span>` : ''}</td>`;
+      }).join('');
+      return `<tr>
+        <td class="rank">${t.rank}</td><td><strong>${esc(t.name)}</strong></td>
+        ${cells}
+        <td class="n">${money(t.cash)}</td><td class="n">${money(t.stockValue)}</td>
+        <td class="n" style="color:var(--blue)">${money(t.total)}</td>
+      </tr>`;
+    }).join('') || `<tr><td colspan="${cols}" class="muted">還沒有隊伍</td></tr>`;
+  }
+
+  // 只切換顯示方式，不用重打 API
+  $('showValue').addEventListener('change', () => { if (lastBoard) renderBoard(lastBoard); });
+
+  async function load() {
+    const lb = await api('/leaderboard');
+    if (lb.ok) { lastBoard = lb.body; renderBoard(lb.body); }
+
+    const ts = await api('/teams');
+    if (ts.ok) {
+      teams = ts.body;
+      syncAssetTeamOptions();
+      $('teams').innerHTML = ts.body.map(t => `
+        <tr><td><strong>${esc(t.display_name)}</strong></td><td class="money">${esc(t.pin)}</td><td class="n">${money(t.cash)}</td>
+        ${isAdmin ? `<td><div class="actions">
+                       <button class="sm ghost" type="button" onclick="editAssets(${t.id})">編輯資產</button>
+                       <button class="sm ghost" type="button" onclick="resetPin(${t.id})">重設 PIN</button>
+                       <button class="sm danger" type="button" onclick="removeTeam(${t.id})">刪除</button>
+                     </div></td>` : ''}</tr>`).join('')
+        || `<tr><td colspan="${isAdmin ? 4 : 3}" class="muted">還沒有隊伍</td></tr>`;
+    }
+
+    const tr = await api('/trades');
+    if (tr.ok) {
+      $('trades').innerHTML = tr.body.map(x => `
+        <tr><td class="muted" style="white-space:nowrap">第${x.wave}波 ${new Date(x.created_at).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' })}</td>
+        <td>${esc(x.team_name)}</td><td>${esc(x.stock_name)}</td>
+        <td>${sideBadge(x.side)}</td><td class="n">${x.shares}</td>
+        <td class="n">${money(x.price)}</td><td class="n">${money(x.total)}</td></tr>`).join('')
+        || '<tr><td colspan="7" class="muted">尚無成交</td></tr>';
+    }
+  }
+
+  (async () => {
+    const me = await api('/me');
+    isAdmin = me.body.adminRole === 'admin';
+    document.querySelectorAll('.admin-only').forEach(el => { el.hidden = !isAdmin; });
+    await load();
+    setInterval(load, 5000);
+  })();
+}
+</script>
+</body></html>

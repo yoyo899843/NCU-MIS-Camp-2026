@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>新聞情報中心 - 賭大股票系統</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="back" href="index.html"><i data-icon="back"></i>回首頁</a>
+<div class="pagehead">
+  <h1>新聞情報中心</h1>
+  <span class="phase idle" id="wave">載入中</span>
+</div>
+<p class="hint">只顯示本波情報；向下滑動即可逐則判讀新聞對四間公司的利多或利空。</p>
+
+<section class="card" aria-live="polite">
+  <div id="list"><p class="hint">載入中…</p></div>
+</section>
+
+<nav class="tiles" aria-label="功能">
+  <a class="tile" href="news.html" aria-current="page"><i data-icon="news"></i>新聞</a>
+  <a class="tile" href="market.html"><i data-icon="chart"></i>個股</a>
+  <a class="tile" href="trade.html"><i data-icon="trade"></i>交易</a>
+  <a class="tile" href="leaderboard.html"><i data-icon="trophy"></i>排行</a>
+</nav>
+
+<script src="ui.js"></script>
+<script src="app.js"></script>
+<script>
+// 本波新聞以時間順序整列呈現；輪詢只在內容有改變時重畫，不會干擾玩家閱讀。
+let lastSig = '';
+
+async function load() {
+  const [news, state] = await Promise.all([api('/api/market/news'), api('/api/market/state')]);
+  if (!news.ok) return;
+  const wave = state.ok ? state.body.wave : '';
+  if (state.ok) $('wave').textContent = `第 ${wave} 波`;
+  // 波次變更時，即使兩波都還沒有新聞（id 清單同樣是空字串）也必須清掉舊畫面。
+  const sig = wave + '|' + news.body.map(n => n.id).join(',');
+  if (sig === lastSig) return;
+  lastSig = sig;
+  $('list').innerHTML = news.body.map(n => `<article class="news-item">
+    <span class="kick">第 ${n.wave} 波</span>
+    <h2>${esc(n.title)}</h2>
+    ${n.body ? `<p>${esc(n.body)}</p>` : ''}
+    <time datetime="${esc(n.published_at)}">${new Date(n.published_at).toLocaleString()}</time>
+  </article>`).join('') || '<p class="hint">本波還沒有新聞，主持人發布後這裡會自動出現。</p>';
+}
+load();
+setInterval(load, 5000);
+</script>
+</body></html>

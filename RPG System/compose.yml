@@ -1,0 +1,65 @@
+# 每個 ${VAR:?...} 的 :? 是「這個變數沒有值就直接失敗」。
+#
+# 沒有這個保護的話，缺 .env 時 compose 只會印一行 warning 然後把變數代成空字串，
+# postgres 因為 POSTGRES_PASSWORD 是空的而拒絕初始化、容器起來就馬上退出，最後
+# 畫面上只看得到「dependency failed to start: container xxx-db is unhealthy」——
+# 那句話完全沒提到真正的原因是少了一個檔案。實際上就踩過這個坑。
+#
+# 加了之後 compose 會在建立任何容器「之前」就停下來，並且直接說出少了哪個變數。
+
+services:
+  app:
+    build: .
+    container_name: rpg-app
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgres://${POSTGRES_USER:?請先在這個資料夾 cp .env.example .env 並填好內容}:${POSTGRES_PASSWORD:?請先在這個資料夾 cp .env.example .env 並填好內容}@db:5432/${POSTGRES_DB:?請先在這個資料夾 cp .env.example .env 並填好內容}
+      JWT_SECRET: ${JWT_SECRET:?請先在這個資料夾 cp .env.example .env 並填好內容}
+    ports:
+      - "9002:3000"
+    # 後台操作紀錄（src/activityLog.js）寫在容器的 /app/logs/actions.log，
+    # 掛到主機這個資料夾的 logs/，重建容器也不會不見，直接在伺服器上看：
+    #   tail -f logs/actions.log
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - ncumis-camp
+      - rpg-internal
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', r => process.exit(r.statusCode===200?0:1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  db:
+    image: postgres:16-alpine
+    container_name: rpg-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?請先在這個資料夾 cp .env.example .env 並填好內容}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?請先在這個資料夾 cp .env.example .env 並填好內容}
+      POSTGRES_DB: ${POSTGRES_DB:?請先在這個資料夾 cp .env.example .env 並填好內容}
+    volumes:
+      - rpg-db-data:/var/lib/postgresql/data
+    networks:
+      - rpg-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?請先在這個資料夾 cp .env.example .env 並填好內容} -d ${POSTGRES_DB:?請先在這個資料夾 cp .env.example .env 並填好內容}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  rpg-db-data:
+
+networks:
+  ncumis-camp:
+    external: true
+  # 固定命名，讓 PgAdmin 的獨立 compose 專案之後可以用 external:true 加入。
+  rpg-internal:
+    name: rpg-internal

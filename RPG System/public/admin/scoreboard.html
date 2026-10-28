@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>戰況板 - 資管皇家學院數位探查儀</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="admin.css">
+<script src="layout.js" defer></script>
+<style>
+  body { max-width: 720px; }
+  th, td { white-space: nowrap; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.85rem; }
+  th, td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; }
+  th { background: var(--card-2); }
+  td.score { font-weight: bold; }
+  tr:first-child td.score { color: var(--accent); }
+</style>
+</head>
+<body class="admin-shell">
+<h1>戰況板</h1>
+<p style="font-size:0.85rem;color:var(--dim)">計分方式：線索放對分支（同一分支任一格都算）每格得 5 分；放錯分支每次記 1 點推理失誤分；沒放的格子不計分。總分＝得分 − 推理失誤分，依總分排名（可能是負的）。即時計算，不是累計存好的固定值。</p>
+
+<div class="card">
+  <button id="refreshBtn">重新整理</button>
+  <div style="overflow-x:auto">
+  <table>
+    <thead>
+      <tr>
+        <th>排名</th><th>學派</th><th>總分</th><th>A／B 分數</th><th>得分</th><th>推理失誤分</th><th>放對格數</th><th>放錯次數</th><th>線索數</th><th>已解鎖分支</th>
+      </tr>
+    </thead>
+    <tbody id="scoreboardBody"></tbody>
+  </table>
+  </div>
+</div>
+
+<script src="../authFetch.js"></script>
+<script>
+const token = localStorage.getItem('adminToken');
+if (!token) location.href = 'login.html';
+
+async function api(path, options = {}) {
+  const res = await fetch('/admin/api' + path, {
+    ...options,
+    headers: { Authorization: 'Bearer ' + token, ...(options.headers || {}) }
+  });
+  if (res.status === 401) {
+    localStorage.removeItem('adminToken');
+    location.href = 'login.html';
+    throw new Error('unauthorized');
+  }
+  return res;
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function loadScoreboard() {
+  const res = await api('/scoreboard');
+  const rows = await res.json();
+  document.getElementById('scoreboardBody').innerHTML = rows.map((r, i) => `
+    <tr>
+      <td>${i + 1}</td>
+      <td>${escapeHtml(r.displayName)}</td>
+      <td class="score">${r.totalScore}</td>
+      <td>${(r.teamScores || []).map(t => `${t.team}：${t.totalScore}`).join('　')}</td>
+      <td>${r.earnedScore}</td>
+      <td>${r.mistakeScore}</td>
+      <td>${r.correctSlots}</td>
+      <td>${r.wrongAttempts}</td>
+      <td>${r.cluesCollected}</td>
+      <td>${r.branchesUnlocked}</td>
+    </tr>
+  `).join('') || '<tr><td colspan="10">目前沒有任何學派帳號</td></tr>';
+}
+
+document.getElementById('refreshBtn').addEventListener('click', loadScoreboard);
+loadScoreboard();
+</script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+services:
+  app:
+    build: .
+    container_name: portal-app
+    restart: unless-stopped
+    # 相對於本 compose 檔讀取；每次 compose up 都會將 .env 的主密碼帶入容器。
+    env_file:
+      - .env
+    environment:
+      PORT: 8000
+      VAULT_DATA_PATH: /data/vault.enc
+    ports:
+      - "9000:8000"
+    networks:
+      - ncumis-camp
+    volumes:
+      - portal-vault-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  ncumis-camp:
+    external: true
+
+volumes:
+  portal-vault-data:

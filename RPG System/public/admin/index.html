@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>遊戲控制 - 資管皇家學院數位探查儀</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="admin.css">
+<script src="layout.js" defer></script>
+<style>
+  .status-badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-weight: bold;
+    color: #fff;
+  }
+  .status-not_started { background: #626b75; }
+  .status-in_progress { background: #2a7d2a; }
+  .status-ended { background: #c00; }
+  .voting-badge { background: #626b75; }
+  .voting-badge.open { background: #2a7d2a; }
+  .voting-badge.closed { background: #a85400; }
+  .reset-zone { margin-top: 18px; padding-top: 14px; border-top: 1px dashed var(--line); }
+  button.danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  button.danger:hover { background: var(--danger); color: #1a0508; }
+  .msg { font-size: 14px; margin: 8px 0 0; }
+  .msg:empty { display: none; }
+  .msg.ok { color: var(--accent); }
+  .msg.error { color: var(--danger); }
+</style>
+</head>
+<body class="admin-shell">
+<h1>遊戲控制</h1>
+<p id="gatekeeperNote" class="card" style="display:none;color:var(--amber)">你目前是「關主」，請從選單進入「關主現場操作」幫隊伍標記關卡、派發線索，或查看戰況板。設定類的功能（遊戲內容、帳號、遊戲進程）只有管理員能改。</p>
+
+<div class="card admin-only" style="display:none">
+  <h3>遊戲進程控制</h3>
+  <p>目前狀態：<span id="statusBadge" class="status-badge">載入中...</span></p>
+  <p id="timestamps" style="font-size:0.85rem;color:var(--dim)"></p>
+  <button id="startBtn">開始遊戲</button>
+  <button id="endBtn">強制結束遊戲</button>
+  <p id="controlResult" class="error"></p>
+
+  <div class="reset-zone">
+    <h3>重置遊戲</h3>
+    <p class="hint">清掉所有隊伍的遊戲進度：關卡進度、線索、權限碼兌換、科技樹紀錄、長老投票、地圖位置，遊戲狀態回到「未開始」、投票回到「尚未開放」。
+      <strong>學派帳號與密碼、關卡、線索、權限碼、科技樹、長老、工作人員帳號都會保留。</strong>
+      結束遊戲不會清任何資料；要看的最終分數和投票結果，請在重置前先記下來。</p>
+    <button id="resetBtn" type="button" class="danger">重置遊戲（清除所有進度）</button>
+    <p id="resetResult" class="msg" role="status"></p>
+  </div>
+</div>
+
+<div class="card admin-only" style="display:none">
+  <h3>最終決策投票控制</h3>
+  <p>投票狀態：<span id="votingBadge" class="status-badge voting-badge">載入中...</span></p>
+  <p id="votingCounts" style="font-size:0.85rem;color:var(--dim)"></p>
+  <button id="openVotingBtn">開放投票</button>
+  <button id="closeVotingBtn">關閉投票</button>
+  <p id="votingResult" class="error"></p>
+  <div id="votingResults" style="margin-top:8px"></div>
+</div>
+
+<script src="../authFetch.js"></script>
+<script>
+const token = localStorage.getItem('adminToken');
+if (!token) location.href = 'login.html';
+
+const statusLabels = { not_started: '未開始', in_progress: '進行中', ended: '已結束' };
+
+async function api(path, options = {}) {
+  const res = await fetch('/admin/api' + path, {
+    ...options,
+    headers: { Authorization: 'Bearer ' + token, ...(options.headers || {}) }
+  });
+  if (res.status === 401) {
+    localStorage.removeItem('adminToken');
+    location.href = 'login.html';
+    throw new Error('unauthorized');
+  }
+  return res;
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function renderState(state) {
+  const badge = document.getElementById('statusBadge');
+  badge.textContent = statusLabels[state.status] || state.status;
+  badge.className = 'status-badge status-' + state.status;
+
+  const parts = [];
+  if (state.started_at) parts.push(`開始於 ${new Date(state.started_at).toLocaleString()}`);
+  if (state.ended_at) parts.push(`結束於 ${new Date(state.ended_at).toLocaleString()}`);
+  document.getElementById('timestamps').textContent = parts.join('　');
+
+  document.getElementById('startBtn').disabled = state.status === 'in_progress';
+  document.getElementById('endBtn').disabled = state.status !== 'in_progress';
+
+  renderVotingBadge(state);
+}
+
+function renderVotingBadge(state) {
+  const badge = document.getElementById('votingBadge');
+  let label, cls;
+  if (!state.voting_unlocked_at) {
+    label = '尚未開放'; cls = '';
+  } else if (state.voting_closed_at) {
+    label = '已關閉'; cls = 'closed';
+  } else {
+    label = '開放中'; cls = 'open';
+  }
+  badge.textContent = label;
+  badge.className = 'status-badge voting-badge' + (cls ? ' ' + cls : '');
+
+  document.getElementById('openVotingBtn').disabled = cls === 'open';
+  document.getElementById('closeVotingBtn').disabled = cls !== 'open';
+}
+
+async function loadState() {
+  const res = await api('/game/state');
+  renderState(await res.json());
+}
+
+async function loadVotingResults() {
+  const res = await api('/votes/results');
+  const data = await res.json();
+  document.getElementById('votingCounts').textContent = `已投票 ${data.voted_schools}/${data.total_schools} 個學派`;
+  document.getElementById('votingResults').innerHTML = data.elders.map(e =>
+    `<div>${escapeHtml(e.name)}：${e.vote_count} 票</div>`
+  ).join('') || '<p>目前沒有任何候選人。</p>';
+}
+
+document.getElementById('startBtn').addEventListener('click', async () => {
+  const resultEl = document.getElementById('controlResult');
+  const res = await api('/game/start', { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) {
+    resultEl.textContent = data.error || `失敗 (${res.status})`;
+    return;
+  }
+  resultEl.textContent = '';
+  renderState(data);
+});
+
+document.getElementById('endBtn').addEventListener('click', async () => {
+  if (!confirm('確定要強制結束遊戲嗎？')) return;
+  const resultEl = document.getElementById('controlResult');
+  const res = await api('/game/end', { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) {
+    resultEl.textContent = data.error || `失敗 (${res.status})`;
+    return;
+  }
+  resultEl.textContent = '';
+  renderState(data);
+});
+
+document.getElementById('resetBtn').addEventListener('click', async () => {
+  const resultEl = document.getElementById('resetResult');
+  // 收不回來的操作：要主辦手打確認字，不是按一下「確定」就好（伺服器也會再檢查一次）
+  const typed = prompt(
+    '重置後所有隊伍的遊戲進度都會清掉，無法復原（帳號與遊戲設定會保留）。\n\n' +
+    '確定要重置，請輸入「重置遊戲」：'
+  );
+  if (typed === null) return;
+  if (typed.trim() !== '重置遊戲') {
+    resultEl.textContent = '輸入的字不符，沒有重置';
+    resultEl.className = 'msg error';
+    return;
+  }
+
+  const btn = document.getElementById('resetBtn');
+  btn.disabled = true;
+  try {
+    const res = await api('/game/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: '重置遊戲' })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      resultEl.textContent = data.error || `失敗 (${res.status})`;
+      resultEl.className = 'msg error';
+      return;
+    }
+    const summary = Object.entries(data.cleared).map(([label, n]) => `${label} ${n} 筆`).join('、');
+    resultEl.textContent = '已重置遊戲。' + (summary ? `清除了：${summary}。` : '本來就沒有任何進度。');
+    resultEl.className = 'msg ok';
+    renderState(data.state);
+    await loadVotingResults();
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+document.getElementById('openVotingBtn').addEventListener('click', async () => {
+  const resultEl = document.getElementById('votingResult');
+  const res = await api('/game/open-voting', { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) {
+    resultEl.textContent = data.error || `失敗 (${res.status})`;
+    return;
+  }
+  resultEl.textContent = '';
+  await loadState();
+  await loadVotingResults();
+});
+
+document.getElementById('closeVotingBtn').addEventListener('click', async () => {
+  if (!confirm('確定要關閉投票嗎？關閉後隊伍就不能再投票或改票了。')) return;
+  const resultEl = document.getElementById('votingResult');
+  const res = await api('/game/close-voting', { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok) {
+    resultEl.textContent = data.error || `失敗 (${res.status})`;
+    return;
+  }
+  resultEl.textContent = '';
+  await loadState();
+  await loadVotingResults();
+});
+
+// 依目前登入者的權限層級決定要顯示哪些東西。純前端隱藏只是介面上的體貼，
+// 真正的權限是後端 middleware/gatekeeperGuard.js 在擋，關主就算自己打 API
+// 也一樣會被 403 擋下來。
+async function loadMe() {
+  const res = await api('/me');
+  const me = await res.json();
+  const isAdmin = me.adminRole === 'admin';
+  document.getElementById('gatekeeperNote').style.display = isAdmin ? 'none' : '';
+  document.querySelectorAll('.admin-only').forEach(el => { el.style.display = isAdmin ? '' : 'none'; });
+  return isAdmin;
+}
+
+(async () => {
+  const isAdmin = await loadMe();
+  if (isAdmin) {
+    await loadState();
+    await loadVotingResults();
+  }
+})();
+</script>
+</body>
+</html>

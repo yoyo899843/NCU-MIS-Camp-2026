@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>儀表板 - 資管皇家學院數位探查儀</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>資管皇家學院數位探查儀</h1>
+
+<div id="notLoggedIn" class="card" style="display:none">
+  <p>請先<a href="login.html">登入</a>學派帳號。</p>
+</div>
+
+<div id="dashboard" class="card" style="display:none">
+  <p id="who"></p>
+  <p class="nav">
+    <a href="map.html">探索導覽</a>
+    <a href="clue-scan.html">線索掃描</a>
+    <a href="clue-vault.html">線索庫</a>
+    <a href="redeem.html">權限碼兌換</a>
+    <a href="tech-tree-a.html">數位偵探 A 隊</a>
+    <a href="tech-tree-b.html">數位偵探 B 隊</a>
+    <a href="voting.html">最終決策</a>
+  </p>
+  <button id="logoutBtn">登出</button>
+</div>
+
+<!-- 工作人員入口單獨一張卡，不放進上面那個 nav：那個 nav 只有學派登入成功才會出現，
+     但管理員/關主本來就不會有學派帳號，要能直接進得去。也因為它跟登入狀態無關，
+     這張卡不做顯示/隱藏，兩種狀態下都在。 -->
+<div class="card">
+  <p class="nav"><a href="admin/login.html">管理後台</a></p>
+  <p class="hint">工作人員專用：管理員與關主從這裡登入。</p>
+</div>
+
+<script src="authFetch.js"></script>
+<script>
+const token = localStorage.getItem('schoolToken');
+const schoolInfo = JSON.parse(localStorage.getItem('schoolInfo') || 'null');
+
+if (!token || !schoolInfo) {
+  document.getElementById('notLoggedIn').style.display = '';
+} else {
+  // 這一頁本來完全不會打任何 API，只看 localStorage 裡還留著什麼就決定要不要
+  // 顯示「已登入」。但 token 過期不會讓 localStorage 自動清空，結果是 token
+  // 早就失效了，這頁還是一直顯示「目前登入學派：X」，要等玩家點進某個功能
+  // 才會被 authFetch.js 攔下 401 踢出去。這裡主動打一次 /me 確認 token 還有效，
+  // 401 的話 authFetch.js 會處理清除與導頁，不用在這裡重複處理。
+  fetch('/api/auth/me', { headers: { Authorization: 'Bearer ' + token } })
+    .then(res => {
+      if (window.__authRedirecting) return; // authFetch.js 已經在導頁了，不用再做事
+      if (!res.ok) return; // 非 401 的錯誤先不擋顯示，避免偶發的伺服器錯誤就把人踢出去
+      document.getElementById('dashboard').style.display = '';
+      document.getElementById('who').textContent = `目前登入學派：${schoolInfo.displayName}`;
+    })
+    .catch(() => {
+      if (window.__authRedirecting) return;
+      // 網路暫時連不上：還是先用本機存的資訊顯示，不要因為偶發的網路問題就把人擋在外面
+      document.getElementById('dashboard').style.display = '';
+      document.getElementById('who').textContent = `目前登入學派：${schoolInfo.displayName}`;
+    });
+}
+
+document.getElementById('logoutBtn')?.addEventListener('click', () => {
+  localStorage.removeItem('schoolToken');
+  localStorage.removeItem('schoolInfo');
+  location.reload();
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>探索導覽 - 資管皇家學院數位探查儀</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  /* 版面改成「上面一條 bar、下面整塊地圖」的正常排版，而不是把 bar 浮在地圖上。
+     原本 .top-bar 是 position:absolute 疊在地圖上，剛好壓住 Leaflet 左上角的
+     縮放 +/- 按鈕，放大縮小要盲點。改成正常流之後就不會互相蓋到。 */
+  html, body { height: 100%; }
+  body { max-width: none; padding: 0; margin: 0; display: flex; flex-direction: column; }
+  #content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  #map { flex: 1; min-height: 0; width: 100%; }
+  .top-bar {
+    flex: none;
+    background: var(--card);
+    border-bottom: 1px solid var(--line);
+    padding: 8px 12px;
+    font-size: 0.9rem;
+    display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px;
+  }
+  .top-bar .back {
+    color: var(--accent); text-decoration: none; font-weight: 700;
+    padding: 4px 8px; margin: -4px 0 -4px -8px; border-radius: 4px;
+  }
+  .top-bar .back:hover, .top-bar .back:active { background: var(--card-3); }
+</style>
+</head>
+<body>
+<div id="notLoggedIn" class="card" style="display:none; margin: 16px;">
+  <p>請先<a href="login.html">登入</a>學派帳號。</p>
+</div>
+
+<div id="content" style="display:none">
+  <div class="top-bar">
+    <a class="back" href="index.html">&laquo; 回儀表板</a>
+    <strong>探索導覽</strong>
+    <span id="progressSummary"></span>
+    <span id="locationStatus"></span>
+    <span id="loadError" class="error"></span>
+  </div>
+  <div id="map"></div>
+</div>
+
+<script src="authFetch.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="geofence.js"></script>
+<script>
+// 這幾個常數/函式一定要放在 initMap() 被呼叫「之前」——initMap() 裡面同步用到
+// LOCATION_INTERVAL_MS（setInterval 的第二個參數，呼叫當下就會讀值，不是等
+// callback 觸發才讀），如果宣告寫在 initMap() 呼叫之後，const 的 temporal dead
+// zone 會讓這裡直接丟 ReferenceError、把 initMap() 剩下的內容全部中斷執行
+// ——包含最下面畫關卡標記那段，這正是之前「關卡點位看不到」的真正原因
+// （用無頭瀏覽器實際跑過，主控台真的噴出這個錯誤，不是靠猜的）。
+const LOCATION_INTERVAL_MS = 2000;
+
+const token = localStorage.getItem('schoolToken');
+const schoolInfo = JSON.parse(localStorage.getItem('schoolInfo') || 'null');
+if (!token || !schoolInfo) {
+  document.getElementById('notLoggedIn').style.display = '';
+} else {
+  document.getElementById('content').style.display = '';
+  initMap();
+}
+
+function initMap() {
+  // 地圖「可以看/可以拖曳」的範圍，刻意跟 geofence.js 的 CAMPUS_BOUNDS（GPS
+  // 圍籬、判定玩不玩得了遊戲）分開設定，兩者是不同的東西：這裡只管地圖 UI
+  // 讓使用者看多廣，跟能不能玩遊戲無關。
+  //
+  // 這塊範圍＝scripts/download-tiles.js 裡的「基準矩形」（活動 bbox 外擴 150
+  // 公尺），該腳本現在保證每一個 zoom 都完整覆蓋這同一塊矩形，所以放大縮小
+  // 看到的範圍一致，不會再出現「z18 看得到、放大到 z19 變空白」。
+  // 兩邊要改要一起改（download-tiles.js 的 BBOX / MARGIN_M）。
+  //
+  // 這裡再往內縮約 10 公尺，避開「邊界剛好精準卡在圖磚格線上」時浮點數捨入
+  // 可能讓 Leaflet 去要求格線另一側那一格的狀況。
+  const BOUNDS = L.latLngBounds(
+    [25.016828, 121.931406],
+    [25.023019, 121.942117]
+  );
+
+  // minZoom 決定「使用者最多能縮多小」，要跟上面 BOUNDS 的大小成比例——縮到
+  // minZoom 時，畫面實際看到的地理範圍如果比 maxBounds 限制的範圍還大，
+  // Leaflet 會不斷把畫面拉回置中、超出範圍的部分也沒有圖磚可畫（一片空白）。
+  //
+  // maxBounds 刻意不加 .pad(...)：BOUNDS 本身已經是「剛好完整覆蓋、還往內縮
+  // 過」的範圍，再加 padding 只會把 maxBounds 往外推到超出實際圖磚覆蓋範圍，
+  // 又重演同樣的空白問題（已經實測驗證過：加 0.2 padding 後，zoom 17/18/19
+  // 都會出現大量缺漏的圖磚格）。
+  const map = L.map('map', {
+    minZoom: 18,
+    maxZoom: 19,
+    maxBounds: BOUNDS,
+    maxBoundsViscosity: 1.0
+  });
+  map.fitBounds(BOUNDS);
+  // GPS 圍籬的提示條出現/消失會改變地圖容器的高度，但那不是視窗 resize，Leaflet
+  // 不會自己發現，會繼續用舊尺寸繪製（底部露灰帶、點到的座標也會偏）。盯著容器
+  // 本身，尺寸一變就叫 Leaflet 重新量。
+  new ResizeObserver(() => map.invalidateSize()).observe(document.getElementById('map'));
+
+
+  // 自行 host 的活動範圍 tile 圖磚（scripts/download-tiles.js 下載好放進
+  // public/tiles/），不對外連任何 tile server。
+  L.tileLayer('/tiles/{z}/{x}/{y}.png', {
+    minZoom: 15,
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+  }).addTo(map);
+
+  // 自己的位置：不用等伺服器回應，收到 GPS 更新的當下直接畫在地圖上。
+  // 玩家地圖只畫自己，看不到其他裝置；全場位置只有後台的即時地圖看得到。
+  let selfMarker = null;
+  function updateSelfMarker(lat, lng) {
+    if (!selfMarker) {
+      selfMarker = L.circleMarker([lat, lng], {
+        radius: 8,
+        color: '#000',
+        weight: 2,
+        fillColor: '#06c',
+        fillOpacity: 0.9
+      }).addTo(map).bindTooltip('你的位置', { permanent: true });
+    } else {
+      selfMarker.setLatLng([lat, lng]);
+    }
+  }
+
+  // 定位變得不可用（精準度不足／超出範圍／取不到）就把自己的標記拿掉，
+  // 不要留一個舊點在地圖上讓人以為那是現在的位置。
+  function clearSelfMarker() {
+    if (!selfMarker) return;
+    map.removeLayer(selfMarker);
+    selfMarker = null;
+  }
+
+  // GPS 圍籬：離開活動範圍會顯示紅色提示條（見 geofence.js），比照 Time-Space
+  // Warfare 只掛在地圖頁的做法——這裡是唯一需要判斷「人在不在範圍內」的頁面。
+  // 校園範圍內的每次讀值同時拿來畫自己的標記、留著給下面的 2 秒上傳計時器用。
+  // 這支手機的裝置編號：地圖上以裝置為單位顯示，同一個學派幾支手機在跑就是幾個點。
+  // 第一次開地圖時產生、存在這台裝置上；清掉瀏覽器資料才會換一組新的。
+  const deviceId = (() => {
+    const KEY = 'rpgDeviceId';
+    try {
+      const saved = localStorage.getItem(KEY);
+      if (saved && /^[A-Za-z0-9-]{6,64}$/.test(saved)) return saved;
+    } catch (e) { /* 無痕模式讀不到就每次重新產生 */ }
+    const fresh = (crypto.randomUUID ? crypto.randomUUID()
+      : Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join(''));
+    try { localStorage.setItem(KEY, fresh); } catch (e) { /* 忽略 */ }
+    return fresh;
+  })();
+  let latestCoords = null;
+  startGeofence((lat, lng, accuracy) => {
+    latestCoords = { lat, lng, accuracy, deviceId };
+    updateSelfMarker(lat, lng);
+  }, () => {
+    latestCoords = null;
+    clearSelfMarker();
+  });
+
+  // 位置仍然每 2 秒回報一次，給後台的即時地圖用（主辦看全場各裝置在哪裡），
+  // 但這一頁不抓、也不畫其他人的位置。
+  document.getElementById('locationStatus').textContent = '（只顯示你自己；位置會回報給主辦）';
+
+  setInterval(() => {
+    if (!latestCoords) return;
+    fetch('/api/locations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+      body: JSON.stringify(latestCoords)
+    }).catch(() => {}); // 單次上傳失敗不用特別處理，反正 2 秒後會再傳一次
+  }, LOCATION_INTERVAL_MS);
+
+
+  // 關卡 name/description 之後會開放 admin 編輯（見 admin.js 的 checkpoints CRUD，
+  // 目前還是 501 stub），屆時內容就不再是我們自己塞的測試資料、不能再假設它安全，
+  // 所以先在這裡跳脫，避免變成儲存型 XSS（惡意內容存進 DB，每個玩家點開這個
+  // 關卡的地圖標記時就在瀏覽器裡執行）。
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str ?? '';
+    return div.innerHTML;
+  }
+
+  // 依解鎖/完成狀態決定關卡標記顏色：灰色未解鎖、藍色已解鎖待挑戰、綠色已完成挑戰。
+  function markerColor(cp) {
+    if (!cp.unlocked) return '#999';
+    if (cp.challengeStatus === 'completed') return '#2a8';
+    return '#06c';
+  }
+
+  fetch('/api/checkpoints', { headers: { Authorization: 'Bearer ' + token } })
+    .then(res => res.json().then(data => ({ ok: res.ok, status: res.status, data })))
+    .then(({ ok, status, data }) => {
+      if (!ok) {
+        document.getElementById('loadError').textContent = `讀取關卡資料失敗 (${status}): ${data.error || ''}`;
+        return;
+      }
+
+      const unlockedCount = data.filter(cp => cp.unlocked).length;
+      const completedCount = data.filter(cp => cp.challengeStatus === 'completed').length;
+      document.getElementById('progressSummary').textContent =
+        `已解鎖 ${unlockedCount}/${data.length} 關卡，已完成挑戰 ${completedCount}/${data.length}`;
+
+      data.forEach(cp => {
+        if (cp.mapLat == null || cp.mapLng == null) return;
+        const statusLabel = !cp.unlocked
+          ? '尚未解鎖'
+          : cp.challengeStatus === 'completed' ? '挑戰完成'
+          : cp.challengeStatus === 'in_progress' ? '挑戰中'
+          : '已解鎖，尚未挑戰';
+
+        L.circleMarker([cp.mapLat, cp.mapLng], {
+          radius: 10,
+          color: markerColor(cp),
+          fillColor: markerColor(cp),
+          fillOpacity: 0.85
+        })
+          .addTo(map)
+          .bindPopup(
+            `<strong>${escapeHtml(cp.name)}</strong><br>${escapeHtml(cp.description)}<br>` +
+            `狀態：${statusLabel}<br>線索：${cp.clueCollected}/${cp.clueTotal}`
+          );
+      });
+    })
+    .catch(err => {
+      document.getElementById('loadError').textContent = '連線失敗: ' + err.message;
+    });
+}
+</script>
+</body>
+</html>

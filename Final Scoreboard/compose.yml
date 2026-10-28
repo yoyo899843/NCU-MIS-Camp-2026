@@ -1,0 +1,31 @@
+services:
+  app:
+    build: .
+    container_name: final-scoreboard-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: 8000
+      # Container names on the shared ncumis-camp network. Override them in .env if needed.
+      STOCK_URL: ${STOCK_URL:-http://stock-app:3000}
+      RPG_URL: ${RPG_URL:-http://rpg-app:3000}
+      SCOREBOARD_DATA_PATH: /data/scoreboard.json
+    ports:
+      - "9004:8000"
+    volumes:
+      - final-scoreboard-data:/data
+    networks:
+      - ncumis-camp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  ncumis-camp:
+    external: true
+
+volumes:
+  final-scoreboard-data:

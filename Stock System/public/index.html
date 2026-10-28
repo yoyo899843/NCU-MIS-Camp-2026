@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>賭大股票系統</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  .news-nav { display:grid; grid-template-columns:48px minmax(0,1fr) 48px; align-items:center; gap:8px; margin-bottom:14px; }
+  .news-nav button { min-width:44px; min-height:44px; padding:0; border-radius:50%; font-size:30px; line-height:1; }
+  .news-position { margin:0; text-align:center; font-size:14px; color:var(--dim); font-variant-numeric:tabular-nums; }
+</style>
+</head>
+<body>
+<div class="top">
+  <span class="phase" id="phase">載入中</span>
+  <span class="clock" id="clock"></span>
+</div>
+
+<section class="bankcard" aria-label="資產總覽">
+  <div class="row"><h1 class="brand">賭大股票</h1><span class="team" id="who"></span></div>
+  <div class="lab" style="margin-top:14px">總資產</div>
+  <div class="total" id="total">—</div>
+  <div class="split">
+    <div><div class="lab">可用現金</div><div class="num" id="cash">—</div></div>
+    <div><div class="lab">股票現值</div><div class="num" id="stockValue">—</div></div>
+  </div>
+</section>
+
+<section class="card">
+  <h2><i data-icon="bank"></i>本波存款</h2>
+  <div id="depositState"><p class="hint">載入中…</p></div>
+</section>
+
+<nav class="tiles" aria-label="功能">
+  <a class="tile" href="news.html"><i data-icon="news"></i>新聞</a>
+  <a class="tile" href="market.html"><i data-icon="chart"></i>個股</a>
+  <a class="tile" href="trade.html"><i data-icon="trade"></i>交易</a>
+  <a class="tile" href="leaderboard.html"><i data-icon="trophy"></i>排行</a>
+</nav>
+
+<section class="card">
+  <h2><i data-icon="chart"></i>行情與持股</h2>
+  <div id="positions"><p class="hint">載入中…</p></div>
+</section>
+
+<section class="card" id="newsCard" hidden>
+  <h2><i data-icon="news"></i>本波新聞</h2>
+  <div class="news-nav" id="newsNav" hidden>
+    <button id="prevNewsBtn" type="button" aria-label="上一則新聞">‹</button>
+    <p class="news-position" id="newsPosition" aria-live="polite"></p>
+    <button id="nextNewsBtn" type="button" aria-label="下一則新聞">›</button>
+  </div>
+  <div id="news" aria-live="polite"></div>
+  <a class="btn ghost sm" href="news.html" style="margin-top:12px">瀏覽本波新聞</a>
+</section>
+
+<button id="logoutBtn" class="ghost" type="button"><i data-icon="logout" data-size="sm"></i>登出</button>
+<p class="foot"><a href="admin/login.html">工作人員登入</a></p>
+
+<script src="ui.js"></script>
+<script src="app.js"></script>
+<script>
+if (requireLogin()) {
+  const info = JSON.parse(localStorage.getItem('teamInfo') || 'null');
+  let newsItems = [];
+  let newsIndex = 0;
+  let newsSig = '';
+  if (info) $('who').textContent = info.displayName;
+
+  $('logoutBtn').addEventListener('click', () => {
+    localStorage.removeItem('teamToken');
+    localStorage.removeItem('teamInfo');
+    location.href = 'login.html';
+  });
+
+  // 持股列：股價、漲跌、各波價格，有持股的另外寫張數與市值
+  function positionRow(p) {
+    const hist = p.shares ? `持有 ${p.shares} 張 · 市值 ${money(p.value)}` : '未持有';
+    return `<div class="stock">
+      <span class="logo" aria-hidden="true">${esc(Array.from(p.name)[0])}</span>
+      <div class="info"><div class="nm">${esc(p.name)}</div><div class="sub">${hist}</div></div>
+      <div class="right"><div class="px">${p.price === null ? '—' : money(p.price)}</div><div class="sub">${p.previousPrice === null ? '初始價格' : `前一波 ${money(p.previousPrice)}`}</div>${chgHtml(p.changePct)}</div>
+    </div>`;
+  }
+
+  // 首頁只放一則摘要，讓玩家快速切換；完整新聞仍在情報中心以清單上下閱讀。
+  function renderHomeNews() {
+    if (!newsItems.length) {
+      $('newsCard').hidden = true;
+      return;
+    }
+    newsIndex = Math.max(0, Math.min(newsIndex, newsItems.length - 1));
+    const n = newsItems[newsIndex];
+    $('newsCard').hidden = false;
+    $('newsNav').hidden = false;
+    $('newsPosition').textContent = `本波第 ${newsIndex + 1}／${newsItems.length} 則`;
+    $('prevNewsBtn').disabled = newsIndex === 0;
+    $('nextNewsBtn').disabled = newsIndex === newsItems.length - 1;
+    $('news').innerHTML = `<div class="news-item"><span class="kick">第 ${n.wave} 波</span>
+      <h3>${esc(n.title)}</h3>${n.body ? `<p>${esc(n.body)}</p>` : ''}</div>`;
+  }
+
+  $('prevNewsBtn').addEventListener('click', () => { newsIndex -= 1; renderHomeNews(); });
+  $('nextNewsBtn').addEventListener('click', () => { newsIndex += 1; renderHomeNews(); });
+
+  async function load() {
+    const { ok, body } = await api('/api/team/portfolio');
+    if (!ok) return;
+    const tradingNow = body.phase === 'trading';
+    $('phase').className = 'phase' + (tradingNow ? '' : ' idle');
+    $('phase').textContent = `第 ${body.wave} 波 · ${PHASE_LABEL[body.phase] || body.phase}`;
+    $('cash').textContent = money(body.cash);
+    $('stockValue').textContent = money(body.stockValue);
+    $('total').textContent = money(body.total);
+    $('positions').innerHTML = body.positions.map(positionRow).join('')
+      || '<p class="hint">還沒有股票資料。</p>';
+
+    const d = await api('/api/team/deposit');
+    if (d.ok) $('depositState').innerHTML = depositSteps(d.body.phase, d.body.deposit);
+
+    const n = await api('/api/market/news');
+    if (n.ok) {
+      const sig = `${body.wave}|${n.body.map(item => item.id).join(',')}`;
+      if (sig !== newsSig) {
+        const currentId = newsItems[newsIndex]?.id;
+        newsSig = sig;
+        newsItems = n.body;
+        const keepIndex = newsItems.findIndex(item => item.id === currentId);
+        newsIndex = keepIndex >= 0 ? keepIndex : 0;
+        renderHomeNews();
+      }
+    }
+    $('clock').textContent = new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  load();
+  // 股價與審核結果都是主辦在後台改的，玩家端沒有別的方式知道，固定週期問一次
+  setInterval(load, 5000);
+}
+</script>
+</body></html>

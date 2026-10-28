@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>實體銀行對帳 - 賭大股票系統</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body class="wide">
+<a class="back" href="index.html"><i data-icon="back"></i>回後台</a>
+<div class="pagehead"><h1>實體銀行對帳</h1><span class="phase idle">第 <span id="wave">—</span> 波</span></div>
+<p class="hint">隊伍帶實體籌碼到攤位數鈔核對。金額相符按「核准入帳」，不符按「駁回作廢」——駁回的隊伍本波不能買賣股票。</p>
+
+<!-- 待審的排最上面、按鈕最大：這一頁是攤位上拿平板、隊伍排隊等著的時候用的 -->
+<section class="card">
+  <h2><i data-icon="bank"></i>待審核 <span class="badge pending" id="pendingCount">0</span></h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>隊伍</th><th class="n">提報金額</th><th class="n">目前餘額</th><th>操作</th></tr></thead>
+      <tbody id="pending"></tbody>
+    </table>
+  </div>
+  <p class="error" id="err" role="alert"></p>
+</section>
+
+<section class="card">
+  <h2><i data-icon="list"></i>已處理</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>隊伍</th><th class="n">提報金額</th><th class="n">目前餘額</th><th>結果</th></tr></thead>
+      <tbody id="done"></tbody>
+    </table>
+  </div>
+</section>
+
+<script src="../ui.js"></script>
+<script src="admin.js"></script>
+<script>
+if (requireAdminLogin()) {
+  async function load() {
+    const { ok, body } = await api('/deposits');
+    if (!ok) return;
+    $('wave').textContent = body.wave;
+    const pending = body.deposits.filter(d => d.status === 'pending');
+    const done = body.deposits.filter(d => d.status !== 'pending');
+    $('pendingCount').textContent = pending.length;
+
+    $('pending').innerHTML = pending.map(d => `
+      <tr>
+        <td><strong>${esc(d.display_name)}</strong></td>
+        <td class="n" style="font-size:20px">${money(d.amount)}</td>
+        <td class="n muted">${money(d.cash)}</td>
+        <td><div class="actions">
+          <button class="sm approve" type="button" onclick="review(${d.id},'approve')">${icon('check','ic-sm')}核准入帳</button>
+          <button class="sm danger" type="button" onclick="review(${d.id},'reject')">${icon('x','ic-sm')}駁回作廢</button>
+        </div></td>
+      </tr>`).join('') || '<tr><td colspan="4" class="muted">目前沒有等待審核的申報。</td></tr>';
+
+    $('done').innerHTML = done.map(d => `
+      <tr><td>${esc(d.display_name)}</td><td class="n">${money(d.amount)}</td>
+      <td class="n muted">${money(d.cash)}</td><td>${statusBadge(d.status)}</td></tr>`).join('')
+      || '<tr><td colspan="4" class="muted">本波還沒有處理過的申報。</td></tr>';
+  }
+
+  window.review = async function (id, action) {
+    const label = action === 'approve' ? '核准入帳' : '駁回作廢（該隊本波不能交易）';
+    if (!confirm(`確定要${label}嗎？`)) return;
+    $('err').textContent = '';
+    const { ok, body } = await api(`/deposits/${id}/${action}`, { method: 'POST' });
+    if (!ok) { $('err').textContent = body.error || '操作失敗'; return; }
+    await load();
+  };
+
+  load();
+  // 隊伍是陸續來攤位的，固定週期把新提報拉進來
+  setInterval(load, 4000);
+}
+</script>
+</body></html>

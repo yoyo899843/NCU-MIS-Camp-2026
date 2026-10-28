@@ -1,0 +1,702 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>數位偵探 - 資管皇家學院數位探查儀</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  body { max-width: 960px; }
+  .score-row { display: flex; flex-wrap: wrap; gap: 8px 24px; }
+  .tt-layout { display: flex; gap: 16px; align-items: flex-start; }
+  /* 線索庫：黏在視窗裡（捲到下面的分支時不用捲回最上面拿線索），清單在框內自己捲動。
+     標題固定在框頂，只有 #vaultList 捲；overscroll-behavior 讓捲到底時不會連帶把整頁捲走。 */
+  .vault-panel {
+    width: 200px; flex-shrink: 0; position: sticky; top: 8px;
+    display: flex; flex-direction: column; max-height: calc(100dvh - 32px);
+    /* .card 自帶的下邊距要拿掉：捲到頁底時 sticky 會被父層底邊往上推，
+       多出來的 14px 會把框頂的標題推出視窗外 */
+    margin-bottom: 0;
+  }
+  .vault-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .vault-head .hint { font-size: 0.75rem; }
+  .vault-list {
+    margin-top: 8px; overflow-y: auto; overscroll-behavior: contain;
+    min-height: 0; flex: 1; padding-right: 2px;
+  }
+  /* touch-action: pan-y——手指上下滑交給瀏覽器捲動清單，往左右拖才是拖曳線索
+     （見 attachVaultDrag）。原本是 none：線索卡塞滿整個框，手指怎麼滑都被當成拖曳，
+     線索一多下面的就看不到。 */
+  .vault-card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px; margin-bottom: 8px; cursor: grab; touch-action: pan-y; user-select: none;
+  }
+  .vault-card strong { display: block; font-size: 0.85rem; }
+  .vault-card p { font-size: 0.75rem; color: var(--dim); margin: 4px 0 0; }
+  /* 可拖曳、可放置的區塊一律不能選取文字。iPad Safari 只認 -webkit- 前綴，光寫 user-select
+     擋不住；-webkit-touch-callout 關掉長按跳出的選取／放大鏡選單。子元素也要寫，
+     不然手指剛好按在卡片裡的文字上時，iPad 還是會選到那段字。 */
+  .vault-card, .vault-card *, .slot-box, .slot-box *, .drag-ghost {
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  }
+  /* 拖曳進行中整頁都不能選字：手指拖過說明文字時不會順便把它反白 */
+  body.dragging, body.dragging * { -webkit-user-select: none; user-select: none; }
+  .vault-card:focus-visible { outline: 3px solid var(--amber); outline-offset: 2px; }
+  /* 點選放入：選中的卡片亮起來、可以放的格子出現虛線框 */
+  .vault-card.selected { border-color: var(--amber); background: #2a2108; box-shadow: inset 0 0 0 1px var(--amber); }
+  .slot-box.target { outline: 2px dashed var(--amber); outline-offset: 3px; cursor: pointer; }
+  /* 長按拖曳：按滿時間卡片浮起來，告訴使用者「已經拿起來了，可以拖」 */
+  .vault-card.lifting { transform: scale(1.04); box-shadow: 0 8px 20px rgba(0,0,0,.45); transition: transform .12s ease-out; }
+  .select-hint { margin: 8px 0 0; padding: 8px 10px; border-radius: 6px; font-size: 0.8rem;
+                 background: #2a2108; color: var(--amber); border: 1px solid var(--amber); }
+  .select-hint button { width: auto; display: inline-block; margin: 6px 0 0; padding: 6px 12px; min-height: 36px; font-size: 0.8rem; }
+  /* 觸控螢幕：清空格子的 ✕ 放大到手指點得準的大小 */
+  @media (pointer: coarse) {
+    .slot-clear { width: 28px; height: 28px; line-height: 28px; top: -12px; right: -12px; font-size: 1rem; }
+  }
+  @media (prefers-reduced-motion: reduce) { .vault-card.lifting { transition: none; } }
+  .tree-panel { flex: 1; min-width: 0; }
+  .branch-title { display: flex; justify-content: space-between; align-items: center; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; color: #fff; }
+  .badge-locked { background: #626b75; }
+  .badge-unlocked { background: #2a7d2a; }
+  /* 格子不分順序，所以格子之間不畫箭頭，只是並排 */
+  .branch-row { display: flex; align-items: center; gap: 8px; margin: 40px 0 8px; overflow-x: auto; padding: 4px; }
+  .slot-box {
+    position: relative; width: 92px; height: 56px; flex-shrink: 0;
+    border: 2px solid var(--line); border-radius: 6px; background: var(--card);
+    display: flex; align-items: center; justify-content: center;
+    text-align: center; padding: 4px; box-sizing: border-box;
+  }
+  .slot-box-text { font-size: 0.75rem; word-break: break-all; color: var(--dim); }
+  .slot-box.staged { border-color: var(--amber); background: #0f2436; }
+  .slot-box.staged .slot-box-text { color: var(--amber); font-weight: bold; }
+  .slot-box.locked { border-color: var(--accent); background: #12351f; }
+  .slot-box.locked .slot-box-text { color: var(--accent); font-weight: bold; }
+  .slot-box.has-clue { cursor: pointer; }
+  .slot-box.has-clue:focus-visible { outline: 3px solid var(--amber); outline-offset: 3px; }
+  .slot-box.dragover { outline: 3px dashed var(--amber); outline-offset: 2px; }
+  .slot-clear {
+    position: absolute; top: -8px; right: -8px; width: 18px; height: 18px;
+    border-radius: 50%; background: #c00; color: #fff; font-size: 0.7rem;
+    line-height: 18px; text-align: center; cursor: pointer;
+  }
+  .slot-bubble {
+    position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+    margin-bottom: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+    padding: 6px 8px; font-size: 0.7rem; width: 150px; text-align: left; z-index: 5;
+  }
+  .slot-bubble::after {
+    content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+    border: 6px solid transparent; border-top-color: var(--line);
+  }
+  .slot-bubble strong { display: block; margin-bottom: 2px; }
+  .story-box { white-space: pre-wrap; background: var(--card-2); border: 1px solid var(--line); border-radius: 6px; padding: 12px; margin-top: 8px; }
+  .clue-content { white-space: pre-wrap; line-height: 1.65; }
+  .check-bar { position: sticky; bottom: 0; background: var(--card); padding: 8px 0; border-top: 1px solid var(--line); text-align: right; }
+  .check-bar button {
+    width: auto; display: inline-block; padding: 10px 24px; border-radius: 999px;
+    background: var(--amber); color: #1f1400; font-weight: bold; border: none;
+  }
+  .drag-ghost {
+    position: fixed; pointer-events: none; z-index: 2000; opacity: 0.9;
+    background: var(--card); border: 2px solid var(--amber); border-radius: 6px;
+    padding: 6px 10px; font-size: 0.8rem; box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    max-width: 140px;
+  }
+  .operation-toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    z-index: 3000; max-width: calc(100vw - 32px); padding: 10px 16px;
+    border-radius: 999px; background: #7a2f00; color: #fff; font-weight: bold;
+    box-shadow: 0 3px 12px rgba(0,0,0,0.35); pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<h1 id="pageTitle">數位偵探</h1>
+<p class="nav"><a href="index.html">&laquo; 回儀表板</a></p>
+
+<div id="notLoggedIn" class="card" style="display:none">
+  <p>請先<a href="login.html">登入</a>學派帳號。</p>
+</div>
+
+<div id="content" style="display:none">
+  <div class="card">
+    <p>把左側線索庫的線索拖到右邊對應的分支即可；同一分支裡的格子不分先後，放在任一格都能驗證。放好之後按右下角「提交結果」一次驗證。</p>
+    <p>計分：線索放對分支，那一格鎖定變綠、得 5 分；放錯分支，那一格不會鎖定，記 1 點推理失誤分，可以換一張線索再試；沒放的格子不計分。活動結束時以「得分 − 推理失誤分」算總分。整條分支都答對之後，就能閱讀這個分支的劇情。</p>
+  </div>
+
+  <div class="card score-row">
+    <span>得分：<strong id="earnedScore">0</strong></span>
+    <span>推理失誤分：<strong id="mistakeScore">0</strong></span>
+  </div>
+
+  <div class="tt-layout">
+    <div class="vault-panel card">
+      <div class="vault-head"><strong>線索庫清單</strong><span class="hint" id="vaultCount"></span></div>
+      <p class="hint" style="font-size:0.75rem;margin:4px 0 0">點一下線索選取，再點右邊的格子放入；也可以按住線索約半秒後拖曳。上下滑動可捲動清單。</p>
+      <div class="select-hint" id="selectHint" role="status" hidden></div>
+      <div id="vaultList" class="vault-list" tabindex="0" aria-label="線索庫清單，可捲動"></div>
+    </div>
+    <div class="tree-panel">
+      <div id="branchList"></div>
+      <div class="check-bar">
+        <button id="checkBtn">提交結果</button>
+        <p id="checkResult"></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="storyModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:1000; padding:16px; overflow-y:auto">
+  <div class="card" style="max-width:600px; margin:40px auto; background:var(--card)">
+    <h3 id="storyTitle"></h3>
+    <div id="storyContent" class="story-box"></div>
+    <button id="closeStoryBtn">關閉</button>
+  </div>
+</div>
+
+<div id="clueModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:1001; padding:16px; overflow-y:auto" role="dialog" aria-modal="true" aria-labelledby="clueModalTitle" aria-describedby="clueModalContent" tabindex="-1">
+  <div class="card" style="max-width:600px; margin:40px auto; background:var(--card)">
+    <h3 id="clueModalTitle"></h3>
+    <div id="clueModalContent" class="story-box clue-content"></div>
+    <button id="closeClueBtn" type="button">關閉</button>
+  </div>
+</div>
+
+<div id="operationToast" class="operation-toast" style="display:none" role="status" aria-live="polite"></div>
+
+<script src="authFetch.js"></script>
+<script>
+const token = localStorage.getItem('schoolToken');
+const requestedTeam = new URLSearchParams(location.search).get('team');
+const team = requestedTeam === 'B' ? 'B' : 'A';
+document.title = `數位偵探 ${team} 隊 - 資管皇家學院數位探查儀`;
+document.getElementById('pageTitle').textContent = `數位偵探 ${team} 隊`;
+if (!token) {
+  document.getElementById('notLoggedIn').style.display = '';
+} else {
+  document.getElementById('content').style.display = '';
+  init();
+}
+
+let branches = [];
+let scores = { earned: 0, mistake: 0 };
+let vault = [];
+let dragState = null; // { pointerId, clueId, ghostEl } — 同一時間只允許一個拖曳手勢
+let selectedClueId = null; // 點選放入：目前選中、等著點格子放進去的線索
+let suppressClickUntil = 0; // 滑鼠拖完放開時瀏覽器會補一個 click，這段時間內不當成「點選」
+let clueModalOpener = null;
+let operationBusy = false;
+let operationCooldownUntil = 0;
+let operationToastTimer = null;
+
+// 放置與送出檢查都會改變同一份科技樹狀態。至少間隔一秒，避免前一個請求還沒
+// 完成時又送出下一個請求，造成回應順序顛倒、畫面與資料庫狀態不一致。
+const OPERATION_COOLDOWN_MS = 1000;
+
+// 固定色盤，依分支順序取色，純粹用來視覺區分不同分支（跟資料無關）。
+const BRANCH_COLORS = ['#7fd9b0', '#f7a8c4', '#a8c8f0', '#f7d488', '#c9a8f0'];
+
+async function api(path, options = {}) {
+  const res = await fetch(`${path}${path.includes('?') ? '&' : '?'}team=${team}`, {
+    ...options,
+    headers: { Authorization: 'Bearer ' + token, ...(options.headers || {}) }
+  });
+  return res;
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function clueById(id) {
+  return vault.find(c => c.id === id);
+}
+
+async function init() {
+  await Promise.all([loadVault(), loadTechTree()]);
+  render();
+}
+
+async function loadVault() {
+  const res = await api('/api/clues/vault');
+  vault = res.ok ? await res.json() : [];
+}
+
+async function loadTechTree() {
+  const res = await api('/api/tech-tree');
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    document.getElementById('branchList').innerHTML = `<p class="error">讀取失敗 (${res.status}): ${data.error || ''}</p>`;
+    branches = [];
+    return;
+  }
+  const data = await res.json();
+  branches = data.branches;
+  scores = { earned: data.earnedScore, mistake: data.mistakeScore };
+  document.getElementById('earnedScore').textContent = data.earnedScore;
+  document.getElementById('mistakeScore').textContent = data.mistakeScore;
+}
+
+// 目前已經被放進任何格子（不管是已鎖定還是還沒送出檢查）的線索 id，
+// 這些線索要從左側線索庫的清單裡拿掉，不能同時放進兩個格子。
+function placedClueIds() {
+  const ids = new Set();
+  branches.forEach(b => b.slots.forEach(s => { if (s.placedClueId) ids.add(s.placedClueId); }));
+  return ids;
+}
+
+function render() {
+  renderVault();
+  renderBranches();
+}
+
+function renderVault() {
+  const used = placedClueIds();
+  const available = vault.filter(c => !used.has(c.id));
+  const listEl = document.getElementById('vaultList');
+  document.getElementById('vaultCount').textContent = available.length ? `${available.length} 張` : '';
+  // 選中的線索已經被放走（例如用拖的放進格子）就取消選取
+  if (selectedClueId !== null && !available.some(c => c.id === selectedClueId)) selectedClueId = null;
+  listEl.innerHTML = available.map(c => `
+    <div class="vault-card${c.id === selectedClueId ? ' selected' : ''}" data-clue-id="${c.id}" role="button" tabindex="0"
+         aria-pressed="${c.id === selectedClueId}" aria-label="線索：${escapeHtml(c.name)}">
+      <strong>${escapeHtml(c.name)}</strong>
+      <p>${escapeHtml(c.description || '')}</p>
+    </div>
+  `).join('') || '<p style="font-size:0.8rem;color:var(--dim)">線索庫是空的。</p>';
+
+  listEl.querySelectorAll('.vault-card').forEach(cardEl => {
+    const clueId = parseInt(cardEl.dataset.clueId, 10);
+    attachVaultDrag(cardEl, clueId);
+  });
+  renderSelectHint();
+}
+
+// ---- 點選放入：觸控螢幕最穩的放法，不需要手指一直按著拖 ----
+function selectClue(clueId) {
+  selectedClueId = selectedClueId === clueId ? null : clueId;  // 再點一次同一張＝取消
+  render();
+}
+
+function renderSelectHint() {
+  const hint = document.getElementById('selectHint');
+  const clue = selectedClueId !== null ? clueById(selectedClueId) : null;
+  if (!clue) { hint.hidden = true; hint.innerHTML = ''; return; }
+  hint.hidden = false;
+  hint.innerHTML = `已選「${escapeHtml(clue.name)}」，點右邊的格子放入。<br><button type="button" id="cancelSelectBtn">取消選取</button>`;
+  document.getElementById('cancelSelectBtn').addEventListener('click', () => { selectedClueId = null; render(); });
+}
+
+async function placeSelectedInto(slotId) {
+  const clueId = selectedClueId;
+  if (clueId === null) return;
+  if (await placeClue(slotId, clueId)) {
+    selectedClueId = null;
+    render();
+  }
+}
+
+function renderBranches() {
+  const listEl = document.getElementById('branchList');
+  if (branches.length === 0) {
+    listEl.innerHTML = '<p class="card">目前還沒有設定任何科技樹分支。</p>';
+    return;
+  }
+
+  listEl.innerHTML = branches.map((b, i) => {
+    const color = BRANCH_COLORS[i % BRANCH_COLORS.length];
+    return `
+    <div class="card" data-branch-id="${b.id}">
+      <div class="branch-title">
+        <strong>${escapeHtml(b.name)}</strong>
+        <span class="badge ${b.unlocked ? 'badge-unlocked' : 'badge-locked'}">${b.unlocked ? '已解鎖' : `${b.slots.filter(s => s.isLocked).length}/${b.slots.length} 完成`}</span>
+      </div>
+      <div class="branch-row">
+        ${b.slots.map(s => renderSlot(s, color)).join('')}
+      </div>
+      ${b.unlocked ? `<button onclick="readStory(${b.id})">閱讀分支劇情</button>` : ''}
+    </div>
+  `;
+  }).join('');
+
+  // 點格子：有選中的線索、而且這格還能放 → 放進去；否則若格子裡有線索 → 開啟閱讀。
+  // clear 按鈕另有自己的操作，不能因為冒泡又順便觸發；鍵盤用 Enter 或 Space。
+  listEl.querySelectorAll('.slot-box').forEach(slotEl => {
+    const activate = () => {
+      if (selectedClueId !== null && slotEl.dataset.droppable === 'true') {
+        placeSelectedInto(parseInt(slotEl.dataset.slotId, 10));
+      } else if (slotEl.dataset.clueId) {
+        openClueModal(Number(slotEl.dataset.clueId), slotEl);
+      }
+    };
+    slotEl.addEventListener('click', event => {
+      if (event.target.closest('.slot-clear')) return;
+      activate();
+    });
+    slotEl.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      activate();
+    });
+  });
+}
+
+function renderSlot(s, branchColor) {
+  const clue = s.placedClueId ? clueById(s.placedClueId) : null;
+  const stateClass = s.isLocked ? 'locked' : (s.placedClueId ? 'staged' : '');
+  const droppable = !s.isLocked;
+  const isTarget = droppable && selectedClueId !== null;
+  // 空格子平常不可聚焦；選了線索之後才變成可以點、可以用鍵盤選的按鈕
+  const emptyTargetAttrs = !s.placedClueId && isTarget ? ' role="button" tabindex="0" aria-label="把選中的線索放進這一格"' : '';
+  const borderColor = s.isLocked ? '#2a7d2a' : (s.placedClueId ? '#06c' : branchColor);
+
+  return `
+    <div class="slot-box ${stateClass}${s.placedClueId ? ' has-clue' : ''}${isTarget ? ' target' : ''}" data-slot-id="${s.id}" data-droppable="${droppable}"${emptyTargetAttrs}${s.placedClueId ? ` data-clue-id="${s.placedClueId}" role="button" tabindex="0" aria-label="閱讀線索：${escapeHtml(s.placedClueName || '')}"` : ''} style="border-color:${borderColor}">
+      ${s.placedClueId ? `
+        <div class="slot-bubble">
+          <strong>${escapeHtml(s.placedClueName || '')}</strong>
+          ${escapeHtml(clue?.description || '')}
+        </div>
+      ` : ''}
+      ${s.placedClueId && !s.isLocked ? `<span class="slot-clear" onclick="clearSlot(${s.id})">&times;</span>` : ''}
+      <span class="slot-box-text">${s.placedClueId ? escapeHtml(s.placedClueName) : (isTarget ? '點此放入' : '放入線索')}</span>
+    </div>
+  `;
+}
+
+// 三種放線索的方式：
+//
+// 1. 點選放入（renderSelectHint／placeSelectedInto）：點卡片選取、再點格子。觸控螢幕最穩，
+//    不需要手指一直按著拖。
+// 2. 觸控長按拖曳（Touch Events）：按住 HOLD_MS 不動才「拿起來」，之後往任何方向拖都可以，
+//    期間擋掉頁面捲動。還沒按滿就移動超過 HOLD_TOLERANCE_PX，就當成在捲清單、交給瀏覽器。
+//    原本「按下去往右拖才算拖曳」的做法在 iPad 上很不穩：手指一開始只要往下偏一點，
+//    Safari 就判定成捲動並取消拖曳；按著不動又會觸發長按選字。
+// 3. 滑鼠拖曳（Pointer Events）：按下移動超過 DRAG_START_PX 就開始拖，跟原本一樣。
+//
+// 觸控一律走 Touch Events（iPad 的 Apple Pencil 也會送 touch 事件），Pointer Events
+// 只處理滑鼠，兩邊才不會對同一個手勢各處理一次。
+const HOLD_MS = 300;
+const HOLD_TOLERANCE_PX = 10;
+const DRAG_START_PX = 8;
+
+function showOperationToast(message) {
+  const toast = document.getElementById('operationToast');
+  toast.textContent = message;
+  toast.style.display = '';
+  clearTimeout(operationToastTimer);
+  operationToastTimer = setTimeout(() => { toast.style.display = 'none'; }, 1800);
+}
+
+function operationIsThrottled() {
+  return operationBusy || Date.now() < operationCooldownUntil;
+}
+
+function showTooFast() {
+  showOperationToast('操作過快，請稍後一秒');
+}
+
+function beginOperation() {
+  if (operationIsThrottled()) {
+    showTooFast();
+    return false;
+  }
+  operationBusy = true;
+  operationCooldownUntil = Date.now() + OPERATION_COOLDOWN_MS;
+  return true;
+}
+
+function endOperation() {
+  operationBusy = false;
+}
+
+function createGhost(state, clue, x, y) {
+  // 拖曳開始前可能已經選到一段字，先清掉，拖曳期間整頁禁止選字
+  window.getSelection()?.removeAllRanges();
+  document.body.classList.add('dragging');
+  state.ghostEl = document.createElement('div');
+  state.ghostEl.className = 'drag-ghost';
+  state.ghostEl.textContent = clue.name;
+  document.body.appendChild(state.ghostEl);
+  positionGhost(state.ghostEl, x, y);
+}
+
+function attachVaultDrag(cardEl, clueId) {
+  // iOS 長按有時會無視 CSS 直接開始選字或跳出選單，從事件層再擋一次
+  cardEl.addEventListener('selectstart', e => e.preventDefault());
+  cardEl.addEventListener('contextmenu', e => e.preventDefault());
+
+  // ---- 點一下：選取／取消選取（觸控的短按、滑鼠的單擊都會進來）----
+  cardEl.addEventListener('click', () => {
+    if (Date.now() < suppressClickUntil) return;   // 剛拖完放開，不算點選
+    selectClue(clueId);
+  });
+  cardEl.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    selectClue(clueId);
+  });
+
+  // ---- 觸控：長按拿起來再拖 ----
+  cardEl.addEventListener('touchstart', e => {
+    if (e.touches.length !== 1 || dragState) return;
+    const clue = clueById(clueId);
+    if (!clue) return;
+    const startX = e.touches[0].clientX, startY = e.touches[0].clientY;
+    let lastX = startX, lastY = startY;
+    const state = { pointerId: 'touch', clueId, ghostEl: null };
+
+    const holdTimer = setTimeout(() => {
+      if (dragState || operationIsThrottled()) { showTooFast(); detach(); return; }
+      dragState = state;
+      cardEl.classList.add('lifting');
+      navigator.vibrate?.(15);   // Android 會震一下；iPad 不支援，靠卡片浮起來提示
+      createGhost(state, clue, lastX, lastY);
+    }, HOLD_MS);
+
+    const onMove = ev => {
+      const t = ev.touches[0];
+      if (!t) return;
+      lastX = t.clientX; lastY = t.clientY;
+      if (!state.ghostEl) {
+        // 還沒拿起來就移動＝在捲清單，放手交給瀏覽器
+        if (Math.hypot(lastX - startX, lastY - startY) > HOLD_TOLERANCE_PX) { clearTimeout(holdTimer); detach(); }
+        return;
+      }
+      ev.preventDefault();   // 已經拿起來了：拖曳期間不要捲動頁面
+      positionGhost(state.ghostEl, lastX, lastY);
+      updateDropHighlight(lastX, lastY);
+    };
+    const finish = (ev, dropX, dropY) => {
+      clearTimeout(holdTimer);
+      detach();
+      cardEl.classList.remove('lifting');
+      document.body.classList.remove('dragging');
+      if (state.ghostEl) {
+        ev?.preventDefault();   // 拖完放開不要再補一個 click，否則會變成「選取」
+        finishDrag(state, dropX, dropY);
+      }
+    };
+    const onEnd = ev => finish(ev, lastX, lastY);
+    const onCancel = ev => finish(ev, -1, -1);   // 被系統打斷（來電、切 App）就當作沒放下
+    function detach() {
+      document.removeEventListener('touchmove', onMove);
+      document.removeEventListener('touchend', onEnd);
+      document.removeEventListener('touchcancel', onCancel);
+    }
+    // passive: false 才能在拿起來之後 preventDefault 擋掉捲動
+    document.addEventListener('touchmove', onMove, { passive: false });
+    document.addEventListener('touchend', onEnd, { passive: false });
+    document.addEventListener('touchcancel', onCancel);
+  }, { passive: true });
+
+  // ---- 滑鼠：按下移動就開始拖 ----
+  cardEl.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'mouse' || e.button > 0) return;   // 觸控交給上面的 touch 處理
+    if (dragState || operationIsThrottled()) { showTooFast(); return; }
+    const clue = clueById(clueId);
+    if (!clue) return;
+    e.preventDefault();   // 避免拖的時候選到文字
+
+    const startX = e.clientX, startY = e.clientY;
+    const state = { pointerId: e.pointerId, clueId, ghostEl: null };
+    dragState = state;
+
+    const onMove = ev => {
+      if (ev.pointerId !== state.pointerId) return;
+      if (!state.ghostEl) {
+        if (Math.hypot(ev.clientX - startX, ev.clientY - startY) < DRAG_START_PX) return;
+        createGhost(state, clue, ev.clientX, ev.clientY);
+        try { cardEl.setPointerCapture(ev.pointerId); } catch (err) { /* 合成事件的 pointerId 可能被擋，不影響後續 */ }
+      }
+      positionGhost(state.ghostEl, ev.clientX, ev.clientY);
+      updateDropHighlight(ev.clientX, ev.clientY);
+    };
+    const cleanup = () => {
+      document.body.classList.remove('dragging');
+      cardEl.removeEventListener('pointermove', onMove);
+      cardEl.removeEventListener('pointerup', onUp);
+      cardEl.removeEventListener('pointercancel', onCancel);
+      if (dragState === state && !state.ghostEl) dragState = null;   // 只是點一下，沒有真的拖
+    };
+    const onUp = ev => {
+      if (ev.pointerId !== state.pointerId) return;
+      cleanup();
+      if (state.ghostEl) {
+        suppressClickUntil = Date.now() + 400;
+        finishDrag(state, ev.clientX, ev.clientY);
+      }
+    };
+    const onCancel = ev => {
+      if (ev.pointerId !== state.pointerId) return;
+      cleanup();
+      if (state.ghostEl) finishDrag(state, -1, -1);
+    };
+    cardEl.addEventListener('pointermove', onMove);
+    cardEl.addEventListener('pointerup', onUp);
+    cardEl.addEventListener('pointercancel', onCancel);
+  });
+}
+
+function positionGhost(ghost, x, y) {
+  ghost.style.left = (x + 12) + 'px';
+  ghost.style.top = (y + 12) + 'px';
+}
+
+function findDropzoneAt(x, y) {
+  const el = document.elementFromPoint(x, y);
+  const box = el?.closest('.slot-box');
+  return box && box.dataset.droppable === 'true' ? box : null;
+}
+
+function updateDropHighlight(x, y) {
+  document.querySelectorAll('.slot-box.dragover').forEach(el => el.classList.remove('dragover'));
+  findDropzoneAt(x, y)?.classList.add('dragover');
+}
+
+async function finishDrag(state, x, y) {
+  if (dragState !== state) return;
+  dragState = null;
+  state.ghostEl?.remove();
+  document.querySelectorAll('.slot-box.dragover').forEach(el => el.classList.remove('dragover'));
+
+  const box = findDropzoneAt(x, y);
+  if (!box) return; // 沒放到合法的格子上，線索就當作沒拖走，畫面不用變
+
+  const slotId = parseInt(box.dataset.slotId, 10);
+  await placeClue(slotId, state.clueId);
+}
+
+window.clearSlot = async function (slotId) {
+  await placeClue(slotId, null);
+};
+
+async function placeClue(slotId, clueId) {
+  if (!beginOperation()) return false;
+  try {
+    const res = await api(`/api/tech-tree/slots/${slotId}/place`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clueId })
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 429) {
+        showTooFast();
+        return false;
+      }
+      alert(data.error || `失敗 (${res.status})`);
+      return false;
+    }
+    for (const b of branches) {
+      const slot = b.slots.find(s => s.id === slotId);
+      if (slot) {
+        slot.placedClueId = clueId;
+        slot.placedClueName = clueId ? clueById(clueId)?.name ?? null : null;
+        break;
+      }
+    }
+    render();
+    return true;
+  } catch (err) {
+    showOperationToast('連線失敗，請稍後再試');
+    return false;
+  } finally {
+    endOperation();
+  }
+}
+
+window.readStory = async function (branchId) {
+  const res = await api(`/api/tech-tree/branches/${branchId}/story`);
+  const data = await res.json();
+  if (!res.ok) {
+    alert(data.error || `讀取失敗 (${res.status})`);
+    return;
+  }
+  document.getElementById('storyTitle').textContent = data.name;
+  document.getElementById('storyContent').textContent = data.storyContent || '（這個分支還沒有設定劇情內容）';
+  document.getElementById('storyModal').style.display = '';
+};
+
+document.getElementById('closeStoryBtn').addEventListener('click', () => {
+  document.getElementById('storyModal').style.display = 'none';
+});
+
+function openClueModal(clueId, opener) {
+  const clue = clueById(clueId);
+  if (!clue) return;
+
+  clueModalOpener = opener || document.activeElement;
+  document.getElementById('clueModalTitle').textContent = clue.name;
+  document.getElementById('clueModalContent').textContent = clue.description || '（這張線索沒有文字內容）';
+  document.getElementById('clueModal').style.display = '';
+  document.getElementById('closeClueBtn').focus();
+}
+
+function closeClueModal() {
+  document.getElementById('clueModal').style.display = 'none';
+  clueModalOpener?.focus();
+  clueModalOpener = null;
+}
+
+document.getElementById('closeClueBtn').addEventListener('click', closeClueModal);
+document.getElementById('clueModal').addEventListener('click', event => {
+  if (event.target.id === 'clueModal') closeClueModal();
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && selectedClueId !== null && document.getElementById('clueModal').style.display === 'none') {
+    selectedClueId = null;
+    render();
+  }
+  if (event.key === 'Escape' && document.getElementById('clueModal').style.display !== 'none') {
+    closeClueModal();
+  }
+});
+
+document.getElementById('checkBtn').addEventListener('click', async () => {
+  if (!beginOperation()) return;
+  const resultEl = document.getElementById('checkResult');
+  resultEl.className = '';
+  resultEl.textContent = '檢查中...';
+
+  try {
+    const res = await api('/api/tech-tree/check', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) {
+      if (res.status === 429) {
+        showTooFast();
+        resultEl.textContent = '';
+        return;
+      }
+      resultEl.className = 'error';
+      resultEl.textContent = data.error || `失敗 (${res.status})`;
+      return;
+    }
+
+    // 這次拿了幾分、記了幾點失誤分：用提交前後的分數相減，計分規則只在後端（src/scoring.js）一份
+    const before = scores;
+    await Promise.all([loadVault(), loadTechTree()]);
+    render();
+
+    if (data.results.length === 0) {
+      resultEl.textContent = '目前沒有任何已放置、待檢查的格子。';
+    } else {
+      const correctCount = data.results.filter(r => r.correct).length;
+      const gained = scores.earned - before.earned;
+      const mistakes = scores.mistake - before.mistake;
+      resultEl.textContent = `檢查完成：${correctCount}/${data.results.length} 格放對分支` +
+        `（得分 +${gained}${mistakes ? `，推理失誤分 +${mistakes}` : ''}）。` +
+        (data.newlyUnlockedBranches.length ? ` 有 ${data.newlyUnlockedBranches.length} 個分支剛剛解鎖！` : '');
+    }
+  } catch (err) {
+    resultEl.className = 'error';
+    resultEl.textContent = '連線失敗，請稍後再試';
+  } finally {
+    endOperation();
+  }
+});
+</script>
+</body>
+</html>

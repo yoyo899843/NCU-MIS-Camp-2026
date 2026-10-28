@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>總積分榜｜資管新生營</title>
+  <style>
+    :root{--ink:#18233d;--muted:#64748b;--paper:#f5f7fb;--line:#dde4ef;--navy:#142c54;--sky:#2f80ed;--gold:#e9a92c;--card:#fff}*{box-sizing:border-box}body{margin:0;color:var(--ink);background:radial-gradient(circle at 0 0,#e3edf9 0,transparent 35rem),var(--paper);font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Noto Sans TC",sans-serif}.shell{max-width:1120px;margin:auto;padding:28px clamp(16px,3vw,44px) 52px}header{display:flex;justify-content:space-between;gap:24px;align-items:end;margin-bottom:22px}.eyebrow{margin:0 0 5px;color:var(--sky);font-weight:800;font-size:.78rem;letter-spacing:.14em}h1{margin:0;font-size:clamp(1.8rem,4vw,3rem);letter-spacing:-.045em}.intro{margin:6px 0 0;color:var(--muted)}.updated{margin:0;color:var(--muted);font-size:.85rem;text-align:right}.formula{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:20px}.formula article{background:var(--navy);color:#fff;border-radius:14px;padding:14px 16px;box-shadow:0 8px 20px #132d5517}.formula b{display:block;font-size:1.05rem}.formula span{color:#d7e6ff;font-size:.84rem}.card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 8px 24px #18233d0a;overflow:hidden}.toolbar{padding:16px 18px;border-bottom:1px solid var(--line)}.toolbar h2{margin:0;font-size:1.05rem}.toolbar p{margin:2px 0 0;color:var(--muted);font-size:.86rem}.status{padding:9px 18px;background:#f8fbff;color:var(--muted);border-bottom:1px solid var(--line);font-size:.87rem;min-height:40px}.status.error{background:#fff6f7;color:#a51f31}.table-wrap{overflow:auto}.score-table{width:100%;min-width:700px;border-collapse:collapse}.score-table th,.score-table td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}.score-table th{background:#f8fafc;color:#526078;font-size:.76rem;letter-spacing:.04em}.score-table th:first-child,.score-table td:first-child,.score-table td:nth-child(2){text-align:left}.score-table tbody tr:hover{background:#f8fbff}.rank{display:inline-grid;place-items:center;width:27px;height:27px;background:#edf2fa;border-radius:50%;font-weight:850}.rank.one{background:#ffe6a5;color:#7b5000}.rank.two{background:#e8edf3}.rank.three{background:#f8dbc4;color:#8b4318}.total{color:var(--navy);font-size:1.05rem;font-weight:900}.footnote{margin:14px 2px 0;color:var(--muted);font-size:.83rem}.admin-link{color:var(--muted);font-size:.83rem;text-decoration:none}.admin-link:hover{text-decoration:underline;color:var(--navy)}@media(max-width:760px){.shell{padding-top:20px}header{align-items:start;flex-direction:column}.updated{text-align:left}.formula{grid-template-columns:1fr 1fr}.formula article:last-child{grid-column:span 2}}
+  </style>
+</head>
+<body>
+<main class="shell">
+  <header>
+    <div><p class="eyebrow">NCU MIS · FINAL SCOREBOARD</p><h1>總積分榜</h1><p class="intro">五學派即時總排名</p></div>
+    <p class="updated" id="updated">載入中…</p>
+  </header>
+  <section class="formula" aria-label="計分項目"><article><b>對抗賽</b><span>手動輸入成績</span></article><article><b>賭大股票</b><span>投資系統總資產</span></article><article><b>RPG</b><span>科技樹積分 × 1,000</span></article></section>
+  <section class="card"><div class="toolbar"><h2>五學派結算表</h2><p>排行會隨主辦更新。</p></div><div class="status" id="status" role="status">正在取得排行榜…</div><div class="table-wrap"><table class="score-table"><thead><tr><th>名次</th><th>學派</th><th>對抗賽</th><th>賭大股票</th><th>RPG 換算</th><th>最終總分</th></tr></thead><tbody id="rows"></tbody></table></div></section>
+  <p class="footnote"><a class="admin-link" href="admin.html">管理後台</a></p>
+</main>
+<script>
+const n=v=>Number.isFinite(Number(v))?Number(v):0;const fmt=v=>new Intl.NumberFormat('zh-TW',{maximumFractionDigits:2}).format(v);const total=r=>n(r.match)+n(r.stock)+n(r.rpg)*1000;
+function render(data){const ordered=(data.rows||[]).map((r,i)=>({...r,i,total:total(r)})).sort((a,b)=>b.total-a.total||a.i-b.i);let rank=0,last;ordered.forEach((r,i)=>{if(r.total!==last){rank=i+1;last=r.total}r.rank=rank});document.querySelector('#rows').innerHTML=ordered.map(r=>{const medal=r.rank<=3?['','one','two','three'][r.rank]:'';return `<tr><td><span class="rank ${medal}">${r.rank}</span></td><td>${escapeHtml(r.name)}</td><td>${fmt(n(r.match))}</td><td>${fmt(n(r.stock))}</td><td>${fmt(n(r.rpg)*1000)}</td><td class="total">${fmt(r.total)}</td></tr>`}).join('');document.querySelector('#updated').textContent=data.updatedAt?`更新時間：${new Date(data.updatedAt).toLocaleString('zh-TW')}`:'尚未輸入分數';}
+function escapeHtml(value){return String(value||'').replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));}
+(async()=>{try{const res=await fetch('/api/scoreboard',{cache:'no-store'});const data=await res.json();if(!res.ok)throw new Error(data.error||'無法載入排行榜');render(data);document.querySelector('#status').textContent='目前排名';}catch(err){document.querySelector('#status').textContent=err.message;document.querySelector('#status').classList.add('error');}})();
+</script>
+</body>
+</html>
